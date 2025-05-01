@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sawbench" # Renamed package
+version = "0.1.0"
+authors = [
+  { name="Myles Stapelberg", email="myless@mit.edu" }, 
+]
+description = "A package for calculating Surface Acoustic Wave (SAW) properties based on elastic constants and crystal orientation."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # TODO: Choose appropriate license
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7", # saw_calculator likely needs optimization/root finding
+    "matplotlib>=3.4", # example_ni3al.py uses it
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest", 
+]
+
+[project.urls]
+"Homepage" = "https://github.com/mystaple/sawbench" # TODO: Verify URL
+"Bug Tracker" = "https://github.com/mystaple/sawbench/issues" # TODO: Verify URL
+
+[tool.setuptools.packages.find]
+where = ["src"]  # look for packages in src
+
+# Ruff configuration can be added here later, e.g.:
+# [tool.ruff]
+# line-length = 88
+# select = ["E", "F", "W", "I", "N", "D"] # Example selections: pyflakes, pycodestyle, import sorting, pep8-naming, pydocstyle
+# ignore = ["D100", "D104"] # Example ignores for missing module/package docstrings
+
+# [tool.ruff.lint.pydocstyle]
+# convention = "google" 
