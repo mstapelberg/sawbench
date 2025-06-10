@@ -48,3 +48,9 @@ Contributions are welcome! Please see the `CONTRIBUTING.md` file (TODO: create t
 ## License
 
 This project is licensed under the MIT License - see the `LICENSE` file (TODO: create this file) for details.  
+
+
+
+Personal TODO:
+1. Implement grain selection --> get orientation --> calculate SAW speed for grain --> compare to SAW speed measured.
+2. 
