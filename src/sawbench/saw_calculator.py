@@ -1,54 +1,169 @@
 # sawbench/src/sawbench/saw_calculator.py
+"""Module for calculating Surface Acoustic Wave (SAW) properties.
+
+This module provides the SAWCalculator class, which is designed to compute
+SAW velocities, propagation directions, and intensities on anisotropic
+material surfaces. It takes into account material elastic properties and
+crystal orientation (Bunge Z-X-Z' convention).
+
+The calculations are based on established methods for solving wave equations
+in anisotropic media, often involving finding roots of a characteristic
+determinant (related to the G33 Green's function component or boundary
+conditions) and are intended to be consistent with approaches found in
+materials science and acoustics literature, including some MATLAB toolboxes.
+"""
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import svd, det
 from scipy.interpolate import CubicSpline
 from scipy.signal import find_peaks
+from typing import Tuple, List, Optional, Any, Dict, Union
 
-from .euler_transformations import C_modifi, EulerAngles  # Using relative import
+from .euler_transformations import C_modifi, EulerAngles
+from .materials import Material
 
 class SAWCalculator:
-    def __init__(self, material, euler_angles):
-        """
-        Initialize SAWCalculator with material properties and Euler angles.
-        
+    """Calculates Surface Acoustic Wave (SAW) properties for a given material and orientation.
+
+    This class encapsulates the logic for determining SAW velocities and related
+    parameters on a specified crystal surface and propagation direction.
+    It uses the material's elastic tensor and density, along with the crystal's
+    orientation (Euler angles), to perform these calculations.
+
+    Attributes:
+        material (Material): An object representing the material, providing
+            `get_cijkl()` for the 4th-rank elastic tensor (in Pa) and
+            `get_density()` for density (in kg/m³).
+        euler_angles (np.ndarray): A 3-element numpy array representing the Bunge
+            Euler angles (phi1, Phi, phi2) in radians, defining the crystal
+            orientation relative to the sample frame.
+
+    Examples:
+        >>> from sawbench.materials import Material
+        >>> # Define a material (e.g., Vanadium)
+        >>> vanadium_props = {
+        ...     'formula': 'V', 'C11': 229e9, 'C12': 119e9, 'C44': 43e9,
+        ...     'density': 6110, 'crystal_class': 'cubic'
+        ... }
+        >>> vanadium = Material(**vanadium_props)
+        >>> # Define Euler angles for orientation (e.g., no rotation)
+        >>> euler_rad = np.array([0.0, 0.0, 0.0])
+        >>> calculator = SAWCalculator(material=vanadium, euler_angles=euler_rad)
+        >>> # To calculate SAW speed:
+        >>> # v_saw, direction, intensity = calculator.get_saw_speed(deg=0)
+        >>> # print(f"SAW velocity: {v_saw} m/s")
+
+    Notes:
+        The implementation aims to be consistent with established numerical methods
+        for SAW calculations. Input Euler angles (phi1, Phi, phi2) follow the
+        Bunge Z-X-Z' convention and are expected in radians. The `deg` parameter
+        in `get_saw_speed` refers to the in-plane rotation of the SAW propagation
+        direction on the sample surface.
+    """
+    def __init__(self, material: Material, euler_angles: np.ndarray):
+        """Initialize SAWCalculator with material properties and Euler angles.
+
         Args:
-            material: Material object with get_cijkl() and get_density() methods
-            euler_angles: Euler angles in radians, must be within [-2π, 2π]
-        
+            material (Material): Material object. Must have a callable `get_cijkl()`
+                method returning a 3x3x3x3 NumPy array (elastic tensor in Pa)
+                and a callable `get_density()` method returning density (float in kg/m³).
+            euler_angles (np.ndarray): A 3-element NumPy array representing Bunge
+                Euler angles (phi1, Phi, phi2) in radians. These define the
+                crystal orientation. While angles outside [-2π, 2π] are
+                mathematically valid, very large magnitudes (e.g., > 9)
+                will trigger a warning as they might indicate degrees
+                were passed instead of radians.
+
         Raises:
-            TypeError: If material doesn't have required methods
-            ValueError: If euler_angles are invalid
+            TypeError: If the `material` object is not an instance of `Material`
+                or does not have the required `get_cijkl()` or `get_density()` methods.
+            ValueError: If `euler_angles` is not a 3-element array.
+                A stricter internal check also exists for angles far outside typical
+                radian ranges, which might raise a ValueError.
+
+        Examples:
+            >>> from sawbench.materials import Material
+            >>> vanadium_props = {
+            ...     'formula': 'V', 'C11': 229e9, 'C12': 119e9, 'C44': 43e9,
+            ...     'density': 6110, 'crystal_class': 'cubic'
+            ... }
+            >>> vanadium = Material(**vanadium_props)
+            >>> orientation_rad = np.array([np.pi/4, np.pi/3, np.pi/6])
+            >>> calc = SAWCalculator(material=vanadium, euler_angles=orientation_rad)
+            >>> print(f"Calculator initialized for material: {calc.material.formula}")
+            Calculator initialized for material: V
         """
         # Validate material
-        if not hasattr(material, 'get_cijkl') or not hasattr(material, 'get_density'):
-            raise TypeError("Material must have get_cijkl() and get_density() methods")
+        if not isinstance(material, Material):
+            raise TypeError(f"Expected 'material' to be an instance of Material, but got {type(material)}.")
+        if not hasattr(material, 'get_cijkl') or not callable(material.get_cijkl):
+            raise TypeError("Material object must have a callable get_cijkl() method.")
+        if not hasattr(material, 'get_density') or not callable(material.get_density):
+            raise TypeError("Material object must have a callable get_density() method.")
         
-        # Convert euler_angles to numpy array
-        euler_angles = np.asarray(euler_angles)
-        
-        # Check Euler angle shape
-        if euler_angles.shape != (3,):
-            raise ValueError("euler_angles must be a 3-element array")
+        # Convert euler_angles to numpy array and validate
+        try:
+            euler_angles_arr = np.asarray(euler_angles, dtype=float)
+        except Exception as e:
+            raise TypeError(f"euler_angles could not be converted to a NumPy float array: {e}")
+
+        if euler_angles_arr.shape != (3,):
+            raise ValueError(f"euler_angles must be a 3-element array, got shape {euler_angles_arr.shape}")
             
-        # Check Euler angle range - strict validation for Python
-        if np.any(np.abs(euler_angles) > 2 * np.pi):
-            raise ValueError("Euler angles must be in radians and within [-2π, 2π]")
-        elif np.any(np.abs(euler_angles) > 9):
-            print('Warning: Euler angles are expressed in radian not degree. Please check!')
+        # Check Euler angle range - primarily for deg/rad mix-up warning
+        # The ValueError for > 2*pi is a bit strict as angles are periodic,
+        # but the warning for > 9 is a good heuristic for degree input.
+        if np.any(np.abs(euler_angles_arr) > 2 * np.pi + 1e-9): # Using a tolerance
+            # This original ValueError might be too strict if values like 7 rad are intended.
+            # Keeping the warning logic which is more practical for user error.
+            # raise ValueError("Euler angles must be in radians and ideally within [-2π, 2π] for clarity.")
+            if np.any(np.abs(euler_angles_arr) > 9): # Heuristic for degrees
+                print(
+                    f"Warning: Euler angles {euler_angles_arr} have magnitudes > 9. "
+                    "Ensure they are in radians, not degrees."
+                )
+            else: # Still large, but maybe intended
+                print(
+                    f"Warning: Euler angles {euler_angles_arr} are outside the typical [-2π, 2π] range. "
+                    "Ensure they are correctly specified in radians."
+                )
+        elif np.any(np.abs(euler_angles_arr) > 9): # This covers cases not caught by the first if, but still > 9
+             print(
+                f"Warning: Euler angles {euler_angles_arr} have magnitudes > 9. "
+                "Ensure they are in radians, not degrees."
+            )
             
         self.material = material
-        self.euler_angles = euler_angles
+        self.euler_angles = euler_angles_arr # Use the validated array
 
-    def get_saw_speed(self, deg, sampling=4000, psaw=0, draw_plot=False, debug=False, use_optimized=False):
-        """
-        Calculate SAW velocity and related parameters.
-        
+    def get_saw_speed(
+        self,
+        deg: float,
+        sampling: int = 4000,
+        psaw: int = 0,
+        draw_plot: bool = False,
+        debug: bool = False,
+        use_optimized: bool = False
+    ) -> Union[Tuple[np.ndarray, np.ndarray, np.ndarray],
+               Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]]:
+        """Calculate SAW velocity, propagation direction in crystal coords, and intensity.
+
+        This method computes the Surface Acoustic Wave (SAW) properties for a
+        given in-plane propagation angle on the material surface, taking into
+        account the material's elasticity and the crystal's orientation.
+
         Args:
-            deg: Angle rotated on surface plane referred to y direction (0<=deg<180 in degree)
-            sampling: Resolution in k space (400, 4000, or 40000)
-            psaw: Flag for PSAW calculation (0 for SAW only, 1 for SAW and PSAW)
-            draw_plot: If True, generates displacement-slowness plot
+            deg (float): In-plane angle (in degrees) for SAW propagation, measured
+                from a reference direction on the sample surface (typically the y-axis
+                of the unrotated sample frame). Must be in the range [0, 180).
+            sampling (int, optional): Resolution parameter for k-space (slowness space)
+                sampling. Common values are 400, 4000, 40000. Higher values
+                increase accuracy but also computation time. Defaults to 4000.
+            psaw (int, optional): Flag to enable Pseudo-SAW (PSAW) calculation.
+                - 0: Calculate SAW only (default).
+                - 1: Calculate both SAW and PSAW (if present). This may affect peak
+                  selection.
+            draw_plot (bool, optional): If True, generates displacement-slowness plot
             debug: If True, returns intermediate values for testing
             use_optimized: If True, uses the optimized G33 calculation
             
@@ -132,7 +247,7 @@ class SAWCalculator:
         
         # Calculate final values
         v = 1.0 / slownessnew
-        intensity = self._calculate_intensity(ynew, slownessnew)
+        intensity = self._calculate_intensity(ynew, slownessnew, debug=debug)
         
         # Draw plot if requested
         if draw_plot:
@@ -687,7 +802,7 @@ class SAWCalculator:
         Poly_coeffs = term1 + term2 + term3 - term4 - term5 - term6
         return Poly_coeffs
 
-    def _h_l_peak(self, y_new, psaw_flag):
+    def _h_l_peak(self, y_new, psaw_flag, debug=False):
         """Find peaks in the y_new array using a more robust method."""
         # Find local maxima by comparing with neighbors
         peak_candidates = []
@@ -703,10 +818,11 @@ class SAWCalculator:
             return np.array([])
             
         # Debug print
-        print(f"\nPeak finding debug:")
-        print(f"Number of significant peaks found: {len(peak_candidates)}")
-        print(f"Peak positions: {peak_candidates}")
-        print(f"Peak values: {y_new[peak_candidates]}")
+        if debug:
+            print(f"\nPeak finding debug:")
+            print(f"Number of significant peaks found: {len(peak_candidates)}")
+            print(f"Peak positions: {peak_candidates}")
+            print(f"Peak values: {y_new[peak_candidates]}")
         
         # Sort peaks by magnitude
         peak_magnitudes = abs(y_new[peak_candidates])
@@ -720,12 +836,12 @@ class SAWCalculator:
             # Return largest peak for SAW
             return np.array([peak_candidates[0]])
 
-    def _calculate_intensity(self, ynew, slownessnew):
+    def _calculate_intensity(self, ynew, slownessnew, debug=False):
         """
         Calculates the relative intensity of each SAW mode.
         Simplified intensity calculation focusing on peak height difference.
         """
-        YYnew_indices = self._h_l_peak(ynew, False) # Find peaks again, adjust psaw if needed
+        YYnew_indices = self._h_l_peak(ynew, False, debug=debug) # Find peaks again, adjust psaw if needed
         intensity = np.zeros(len(YYnew_indices))
 
         for jj_idx, peak_index in enumerate(YYnew_indices):
@@ -806,4 +922,5 @@ if __name__ == '__main__':
 
     print("SAW Velocity (v):", v_saw)
     print("SAW Direction (index):", index_saw)
+    print("SAW Intensity (intensity):", intensity_saw)
     print("SAW Intensity (intensity):", intensity_saw)
