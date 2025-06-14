@@ -30,6 +30,19 @@ dev = [
     "ruff",
     "pytest", 
 ]
+mace = [
+    "mace-torch",
+]
+nequip = [
+    "nequip",
+]
+mlip-examples = [
+    "ase>=3.22",
+    "pandas",
+    "seaborn",
+    "tqdm",
+    "torch",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/mystaple/sawbench" # TODO: Verify URL

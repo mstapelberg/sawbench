@@ -1,0 +1,20 @@
+# Requirements for running examples
+# Core sawbench dependencies are in pyproject.toml
+
+# For elastic tensor examples
+ase>=3.22
+pandas
+torch
+
+# For plotting and analysis examples  
+matplotlib
+seaborn
+plotly
+
+# For advanced examples
+scikit-learn
+scikit-image
+hdbscan
+defdap
+h5py
+tqdm 

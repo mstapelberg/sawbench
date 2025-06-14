@@ -29,6 +29,14 @@ from .plotting import (
     plot_ebsd_property_map,
     plot_experimental_heatmap,
 )
+from .elastic import (
+    ElasticTensor,
+    from_vasp_dir,
+    calculate_elastic_tensor,
+    calculate_elastic_tensor_with_vasp,
+    tensor_to_voigt,
+    voigt_to_tensor,
+)
 
 # Optionally include EBSDAnalyzer if it's considered core functionality
 # from .centroid_finder import EBSDAnalyzer 
@@ -64,5 +72,12 @@ __all__ = [
     "plot_cdf_difference",
     "plot_ebsd_property_map",
     "plot_experimental_heatmap",
+    # From elastic.py
+    "ElasticTensor",
+    "from_vasp_dir",
+    "calculate_elastic_tensor",
+    "calculate_elastic_tensor_with_vasp",
+    "tensor_to_voigt",
+    "voigt_to_tensor",
     # 'EBSDAnalyzer' # Uncomment if EBSDAnalyzer is included
 ] 
