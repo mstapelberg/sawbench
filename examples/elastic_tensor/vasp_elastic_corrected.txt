@@ -1,0 +1,42 @@
+CORRECTED Elastic Tensor Results
+========================================
+
+ElasticTensor (cubic symmetry)
+==================================================
+
+Stiffness Tensor (GPa):
+     C11     C12     C13     C14     C15     C16
+C1j   261.63  141.71  141.71    0.48    0.01   -0.00
+C2j   141.73  261.96  141.70    0.06    0.01   -0.00
+C3j   141.73  141.70  261.96    0.06    0.01   -0.00
+C4j     0.28   -0.02   -0.02   35.69   -0.00    0.00
+C5j     0.00    0.00    0.00    0.00   35.67   -0.60
+C6j     0.00   -0.00   -0.00    0.00   -0.59   35.69
+
+Elastic Properties:
+Crystal system: cubic
+C₁₁ = 261.63 GPa
+C₁₂ = 141.71 GPa
+C₄₄ = 35.69 GPa
+Bulk modulus (K) = 181.68 GPa
+Shear modulus (G) = 101.40 GPa
+Young's modulus (E) = 256.49 GPa
+Poisson's ratio (ν) = 0.265
+
+
+Comparison with Literature:
+------------------------------
+C11: 261.6 GPa (Literature: 230.0 GPa, Ratio: 1.138)
+C12: 141.7 GPa (Literature: 119.0 GPa, Ratio: 1.191)
+C44: 35.7 GPa (Literature: 43.1 GPa, Ratio: 0.828)
+
+
+For sawbench Material class:
+Material(
+    formula='V-Ti_alloy',  # Based on literature comparison
+    C11=261631048539,  # Pa
+    C12=141711633834,  # Pa
+    C44=35685942210,  # Pa
+    density=your_measured_density,  # kg/m³
+    crystal_class='cubic'
+)
