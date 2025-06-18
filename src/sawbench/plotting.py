@@ -8,31 +8,50 @@ def plot_frequency_histogram(
     ax: Axes, 
     data_mhz: np.ndarray, 
     title: str, 
-    color: str = 'blue', 
     bins: int = 30,
+    label: Optional[str] = None,
+    color: Optional[str] = None,
     xlabel: str = 'Frequency (MHz)',
     ylabel: str = 'Counts',
-    xlim: Optional[Tuple[float, float]] = None
+    xlim: Optional[Tuple[float, float]] = None,
+    alpha: float = 0.7,
+    density: bool = False
 ) -> None:
     """
     Plots a histogram of frequency data on a given Matplotlib Axes object.
+    Can display raw counts, probability density, or frequency.
 
     Args:
         ax (Axes): The Matplotlib Axes object to plot on.
         data_mhz (np.ndarray): 1D array of frequency data in MHz.
         title (str): Title for the histogram.
-        color (str): Color for the histogram bars. Defaults to 'blue'.
         bins (int): Number of bins for the histogram. Defaults to 30.
+        label (Optional[str]): Label for the dataset, used for the legend. Defaults to None.
+        color (Optional[str]): Color for the histogram. If None, uses Matplotlib's default color cycle.
         xlabel (str): Label for the x-axis. Defaults to 'Frequency (MHz)'.
-        ylabel (str): Label for the y-axis. Defaults to 'Counts'.
+        ylabel (str): Label for the y-axis (used when density=False). Defaults to 'Counts'.
         xlim (Optional[Tuple[float, float]]): X-axis limits. Defaults to None.
+        alpha (float): Transparency of the histogram bars. Defaults to 0.7.
+        density (bool): If True, normalize the histogram to form a probability density.
+                        If 'frequency', normalizes by total counts.
+                        If False, show raw counts. Defaults to False.
     """
     valid_data = data_mhz[~np.isnan(data_mhz)]
     if valid_data.size > 0:
-        ax.hist(valid_data, bins=bins, alpha=0.7, color=color, edgecolor='black')
+        weights = None
+        y_label_text = ylabel
+        if density == 'frequency':
+            weights = np.ones_like(valid_data) / len(valid_data)
+            y_label_text = 'Frequency'
+        elif density:
+            y_label_text = 'Probability Density'
+
+        ax.hist(valid_data, bins=bins, alpha=alpha, edgecolor='black', label=label, density=density if isinstance(density, bool) else False, color=color, weights=weights)
         ax.set_title(title)
         ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
+        
+        ax.set_ylabel(y_label_text)
+        
         ax.grid(True, alpha=0.3)
         if xlim:
             ax.set_xlim(xlim)
@@ -93,61 +112,59 @@ def plot_frequency_cdfs(
 def plot_cdf_difference(
     ax: Axes,
     data1_mhz_sorted: np.ndarray,
-    data2_mhz_sorted: np.ndarray,
+    data2_mhz_sorted: List[np.ndarray],
     label1: str = "Dataset 1",
-    label2: str = "Dataset 2",
+    labels2: Optional[List[str]] = None,
     title: str = 'CDF Difference',
     xlabel: str = 'Frequency (MHz)',
     ylabel: str = 'Difference in Cumulative Probability',
     xlim: Optional[Tuple[float, float]] = None
 ) -> None:
     """
-    Plots the difference between two CDFs on a given Matplotlib Axes object.
+    Plots the difference between a reference CDF and one or more other CDFs.
 
     Args:
         ax (Axes): The Matplotlib Axes object to plot on.
-        data1_mhz_sorted (np.ndarray): First dataset (sorted, 1D array in MHz).
-        data2_mhz_sorted (np.ndarray): Second dataset (sorted, 1D array in MHz).
-        label1 (str): Name for the first dataset (used in legend for difference).
-        label2 (str): Name for the second dataset (used in legend for difference).
+        data1_mhz_sorted (np.ndarray): Reference dataset (sorted, 1D array in MHz).
+        data2_mhz_sorted (List[np.ndarray]): List of other datasets to compare.
+        label1 (str): Name for the reference dataset.
+        labels2 (Optional[List[str]]): List of names for the other datasets.
         title (str): Title for the plot. Defaults to 'CDF Difference'.
         xlabel (str): Label for the x-axis. Defaults to 'Frequency (MHz)'.
         ylabel (str): Label for the y-axis. Defaults to 'Difference in Cumulative Probability'.
         xlim (Optional[Tuple[float, float]]): X-axis limits. Defaults to None.
     """
     valid_data1 = data1_mhz_sorted[~np.isnan(data1_mhz_sorted)]
-    valid_data2 = data2_mhz_sorted[~np.isnan(data2_mhz_sorted)]
-
-    if valid_data1.size == 0 or valid_data2.size == 0:
-        ax.text(0.5, 0.5, "Not enough data for CDF difference plot", ha='center', va='center', transform=ax.transAxes)
+    if valid_data1.size == 0:
+        ax.text(0.5, 0.5, "Reference data is empty.", ha='center', va='center')
         ax.set_title(title)
         return
 
-    # Create a common frequency axis for interpolation
-    all_freqs_mhz = np.sort(np.unique(np.concatenate((valid_data1, valid_data2))))
-    
-    # Calculate CDF values for each dataset
-    cdf1_full = np.arange(1, len(valid_data1) + 1) / len(valid_data1)
-    cdf2_full = np.arange(1, len(valid_data2) + 1) / len(valid_data2)
+    # Create a combined frequency axis from all datasets for accurate interpolation
+    all_valid_data = [valid_data1] + [d[~np.isnan(d)] for d in data2_mhz_sorted if d.size > 0]
+    if not all_valid_data:
+        ax.text(0.5, 0.5, "All datasets are empty.", ha='center', va='center')
+        ax.set_title(title)
+        return
+        
+    all_freqs_mhz = np.sort(np.unique(np.concatenate(all_valid_data)))
 
-    # Interpolate CDFs onto the common axis.
-    # To correctly interpolate step CDFs, add points just before each step and ensure start at 0 prob.
-    
-    # CDF 1
-    interp1_freqs = np.concatenate(([all_freqs_mhz.min() - 1e-9], valid_data1, [all_freqs_mhz.max() + 1e-9]))
-    interp1_cdf_vals = np.concatenate(([0], cdf1_full, [1]))
-    unique1_freqs, unique1_indices = np.unique(interp1_freqs, return_index=True)
-    interp_cdf1_on_common = np.interp(all_freqs_mhz, unique1_freqs, interp1_cdf_vals[unique1_indices], left=0.0, right=1.0)
+    # Interpolate the reference CDF
+    cdf1_vals = np.interp(all_freqs_mhz, valid_data1, np.linspace(0, 1, len(valid_data1)), left=0, right=1)
 
-    # CDF 2
-    interp2_freqs = np.concatenate(([all_freqs_mhz.min() - 1e-9], valid_data2, [all_freqs_mhz.max() + 1e-9]))
-    interp2_cdf_vals = np.concatenate(([0], cdf2_full, [1]))
-    unique2_freqs, unique2_indices = np.unique(interp2_freqs, return_index=True)
-    interp_cdf2_on_common = np.interp(all_freqs_mhz, unique2_freqs, interp2_cdf_vals[unique2_indices], left=0.0, right=1.0)
+    colors = plt.cm.viridis(np.linspace(0, 1, len(data2_mhz_sorted)))
     
-    cdf_difference_values = interp_cdf1_on_common - interp_cdf2_on_common
-    
-    ax.plot(all_freqs_mhz, cdf_difference_values, color='purple', label=f'CDF Diff ({label1} - {label2})')
+    for i, data2 in enumerate(data2_mhz_sorted):
+        valid_data2 = data2[~np.isnan(data2)]
+        if valid_data2.size == 0:
+            continue
+
+        cdf2_vals = np.interp(all_freqs_mhz, valid_data2, np.linspace(0, 1, len(valid_data2)), left=0, right=1)
+        cdf_difference = cdf1_vals - cdf2_vals
+        
+        current_label = f'{label1} - {labels2[i]}' if labels2 and i < len(labels2) else f'Diff {i+1}'
+        ax.plot(all_freqs_mhz, cdf_difference, color=colors[i], label=current_label)
+
     ax.axhline(0, color='black', linestyle='--', linewidth=0.8)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
