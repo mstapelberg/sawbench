@@ -19,6 +19,7 @@ from sawbench import (
 # Assumes the script is run from the 'examples/ebsd_analysis/' directory.
 RESULTS_DIR = Path("results")
 REFERENCE_MODEL_KEY = 'exp' # Use experimental data as the reference
+DFT_MODEL_KEY = 'dft' # Use DFT data as a secondary reference
 
 # Experimental Data Config
 path1 = '/home/myless/Documents/saw_freq_analysis/fftData.h5'
@@ -26,11 +27,11 @@ path2 = '/Users/myless/Dropbox (MIT)/Research/2025/Spring_2025/TGS-Mapping/proce
 EXP_HDF5_PATH = path1 if os.path.exists(path1) else path2
 N_EXP_PEAKS_FOR_HIST = 1
 FILTER_EXP_MIN_MHZ = 200.0 
-FILTER_EXP_MAX_MHZ = 400.0 
+FILTER_EXP_MAX_MHZ = 500.0 
 
 # Plotting Parameters
 HIST_BINS = 50
-COMMON_XLIM_MHZ = (250, 350)
+COMMON_XLIM_MHZ = (250, 450)
 OUTPUT_FILENAME = RESULTS_DIR / "model_saw_comparison.png"
 
 
@@ -87,6 +88,54 @@ def load_experimental_results(hdf5_path: str) -> dict:
         'saw_frequencies_mhz': filtered_freqs_hz / 1e6
     }
 
+def plot_cdf_differences_to_reference(ax, all_results, reference_key, xlim, colors):
+    """Helper function to plot CDF differences against a specific reference."""
+    reference_data = None
+    reference_label = ""
+    other_data = []
+    other_labels = []
+    other_colors = []
+
+    # Find the reference dataset
+    for res in all_results:
+        if res['model_key'] == reference_key:
+            reference_data = np.sort(res['saw_frequencies_mhz'])
+            reference_label = res['model_name']
+            break
+
+    if reference_data is None:
+        ax.text(0.5, 0.5, f"Reference data '{reference_key}' not found.",
+                ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(f'CDF Difference from {reference_key.upper()}')
+        return
+
+    # Collect other datasets and their corresponding colors
+    color_map = {res['model_key']: color for res, color in zip(all_results, colors)}
+
+    for res in all_results:
+        if res['model_key'] != reference_key:
+            other_data.append(np.sort(res['saw_frequencies_mhz']))
+            other_labels.append(res['model_name'])
+            # Default to black if a color isn't found, though it shouldn't happen
+            other_colors.append(color_map.get(res['model_key'], 'black'))
+
+    if other_data:
+        plot_cdf_difference(
+            ax,
+            reference_data,
+            other_data,
+            label1=f"Reference: {reference_label}",
+            labels2=other_labels,
+            colors=other_colors,
+            title=f'CDF Difference from {reference_label}',
+            xlim=xlim
+        )
+    else:
+        ax.text(0.5, 0.5, "No other models to compare.",
+                ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(f'CDF Difference from {reference_label}')
+
+
 def main():
     """
     Main function to load SAW frequency data and generate comparison plots.
@@ -107,18 +156,22 @@ def main():
     all_results.sort(key=lambda x: x['model_key'] != REFERENCE_MODEL_KEY)
 
     # --- Plotting Setup ---
-    num_plots = 3  # Histogram, CDF, CDF Difference
-    fig, axs = plt.subplots(1, num_plots, figsize=(num_plots * 6, 5))
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
     
     # Prepare data for plotting functions
     datasets_mhz = [res['saw_frequencies_mhz'] for res in all_results]
     labels = [res['model_name'] for res in all_results]
-    colors = plt.cm.viridis(np.linspace(0, 1, len(datasets_mhz)))
+    
+    # Use a color-blind friendly and distinct color palette
+    # Assign colors to each model based on the sorted list of results
+    model_keys = [res['model_key'] for res in all_results]
+    palette = plt.cm.get_cmap('tab10').colors
+    color_map = {key: palette[i % len(palette)] for i, key in enumerate(model_keys)}
+    colors = [color_map[key] for key in model_keys]
     
     # --- 1. Plot Combined Histogram ---
-    ax = axs[0]
+    ax = axs[0, 0]
     for i, (data, label) in enumerate(zip(datasets_mhz, labels)):
-        # We need to call the histogram plot for each dataset individually.
         plot_frequency_histogram(
             ax, data, 
             title='SAW Frequency Distributions',
@@ -126,51 +179,29 @@ def main():
             color=colors[i],
             bins=HIST_BINS, 
             xlim=COMMON_XLIM_MHZ, 
-            alpha=0.6,
+            alpha=0.7,
             density='frequency'
         )
-    ax.legend() # Add legend to the histogram plot
+    ax.legend()
 
     # --- 2. Plot Combined CDFs ---
-    # Sort the datasets before plotting the CDF
+    ax = axs[0, 1]
     sorted_datasets_mhz = [np.sort(d) for d in datasets_mhz]
     plot_frequency_cdfs(
-        axs[1], sorted_datasets_mhz, labels=labels, colors=colors,
+        ax, sorted_datasets_mhz, labels=labels, 
+        colors=colors,
         title='Cumulative Distribution Functions (CDFs)',
         xlim=COMMON_XLIM_MHZ
     )
 
-    # --- 3. Plot CDF Differences ---
-    reference_data = None
-    other_data = []
-    other_labels = []
+    # --- 3. Plot CDF Differences vs. Experimental ---
+    plot_cdf_differences_to_reference(axs[1, 0], all_results, REFERENCE_MODEL_KEY, COMMON_XLIM_MHZ, colors)
 
-    for res in all_results:
-        sorted_data = np.sort(res['saw_frequencies_mhz'])
-        if res['model_key'] == REFERENCE_MODEL_KEY:
-            reference_data = sorted_data
-            reference_label = res['model_name']
-        else:
-            other_data.append(sorted_data)
-            other_labels.append(res['model_name'])
-            
-    if reference_data is not None and other_data:
-        plot_cdf_difference(
-            axs[2], 
-            reference_data,
-            other_data,
-            label1=f"Reference: {reference_label}",
-            labels2=other_labels,
-            title='CDF Difference from Reference',
-            xlim=COMMON_XLIM_MHZ
-        )
-    else:
-        axs[2].text(0.5, 0.5, "Reference or other models not found\nfor CDF difference plot.", 
-                    ha='center', va='center', transform=axs[2].transAxes)
-        axs[2].set_title('CDF Difference from Reference')
+    # --- 4. Plot CDF Differences vs. DFT ---
+    plot_cdf_differences_to_reference(axs[1, 1], all_results, DFT_MODEL_KEY, COMMON_XLIM_MHZ, colors)
 
 
-    plt.tight_layout()
+    plt.tight_layout(pad=3.0)
     plt.savefig(OUTPUT_FILENAME, dpi=300)
     print(f"\nSaved comparison plot to: {OUTPUT_FILENAME}")
     plt.show()

@@ -57,7 +57,7 @@ else:
 N_PEAKS_TO_EXTRACT_EXP = 3
 N_EXP_PEAKS_FOR_HIST = 1
 FILTER_EXP_MIN_MHZ = 200.0 
-FILTER_EXP_MAX_MHZ = 400.0 
+FILTER_EXP_MAX_MHZ = 500.0 
 
 # EBSD Data Parameters
 EBSD_DATA_PATH = "V1.2Ti_5.6 Specimen 1 Area 1 Montaged Data 2 Montaged Map Data-Corrected" # USER: Please verify path
