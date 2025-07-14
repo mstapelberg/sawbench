@@ -73,3 +73,6 @@ env/
 
 #ruff
 .ruff_cache/
+
+#macos 
+hard_drive_backup/
