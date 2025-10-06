@@ -8,8 +8,9 @@ import pandas as pd
 import h5py
 import numpy as np
 from defdap import ebsd
-from typing import Tuple, Dict, List, Optional, Union # Added Union for ebsd.Map | None
+from typing import Tuple, Dict, List, Optional
 from io import StringIO
+import os
 
 def read_ctf(filepath: str) -> Tuple[Dict[str, List[str]], pd.DataFrame]:
     """Reads an Oxford Instruments .ctf file.
@@ -232,30 +233,58 @@ def load_ebsd_map(
         from `defdap`.
     """
     try:
-        print(f"Loading EBSD map from: {file_path} (type: {data_type})")
-        # Initialize the EBSD map object using defdap
-        ebsd_map_obj = ebsd.Map(file_path, dataType=data_type)
-        
-        # Convert crystal orientations to quaternions for internal calculations
-        ebsd_map_obj.buildQuatArray()
-        print(f"EBSD Phases found: {[phase.name for phase in ebsd_map_obj.phases]}")
-        
-        # Identify grain boundaries based on the misorientation threshold
-        print(f"Finding boundaries with misorientation definition: {boundary_def}°")
-        ebsd_map_obj.findBoundaries(boundDef=boundary_def)
-        
-        # Identify grains based on the minimum grain size
-        # This step also populates the grainIDMap attribute in the ebsd_map_obj
-        print(f"Finding grains with minimum size: {min_grain_size} pixels")
-        ebsd_map_obj.findGrains(minGrainSize=min_grain_size)
-        print(f"Identified {len(ebsd_map_obj.grainList)} EBSD grains.")
-        
-        return ebsd_map_obj
-        
-    except FileNotFoundError:
-        print(f"ERROR: EBSD data file not found at {file_path}")
+        # Build candidate paths to work around defdap adding extensions (e.g., .ctf.ctf)
+        candidates: List[str] = []
+        candidates.append(file_path)
+
+        # If the file path ends with a known text extension, also try without extension
+        root, ext = os.path.splitext(file_path)
+        if ext.lower() in ('.ctf', '.ang'):
+            candidates.append(root)
+
+        last_error: Optional[Exception] = None
+        for candidate in candidates:
+            try:
+                abs_candidate = os.path.abspath(candidate)
+                print(f"Loading EBSD map from: {abs_candidate} (type: {data_type})")
+                # Initialize the EBSD map object using defdap
+                ebsd_map_obj = ebsd.Map(abs_candidate, dataType=data_type)
+
+                # Convert crystal orientations to quaternions for internal calculations
+                ebsd_map_obj.buildQuatArray()
+                print(f"EBSD Phases found: {[phase.name for phase in ebsd_map_obj.phases]}")
+
+                # Identify grain boundaries based on the misorientation threshold
+                print(f"Finding boundaries with misorientation definition: {boundary_def}°")
+                ebsd_map_obj.findBoundaries(boundDef=boundary_def)
+
+                # Identify grains based on the minimum grain size
+                # This step also populates the grainIDMap attribute in the ebsd_map_obj
+                print(f"Finding grains with minimum size: {min_grain_size} pixels")
+                ebsd_map_obj.findGrains(minGrainSize=min_grain_size)
+                print(f"Identified {len(ebsd_map_obj.grainList)} EBSD grains.")
+
+                return ebsd_map_obj
+            except FileNotFoundError as fe:
+                last_error = fe
+                print(f"ERROR: EBSD data file not found at {candidate}")
+                continue
+            except Exception as e1:
+                # Some defdap versions may throw other exceptions for path issues
+                last_error = e1
+                msg = str(e1)
+                # If this looks like a double-extension issue, try the root (handled by candidates above)
+                if ".ctf.ctf" in msg or ".ang.ang" in msg:
+                    print(f"Warning: Possible double-extension issue for {candidate}. Trying alternative path variants...")
+                    continue
+                print(f"Error processing EBSD data with defdap for path {candidate}: {e1}")
+                continue
+
+        # If none of the candidates worked
+        if last_error is not None:
+            print(f"Failed to load EBSD map after trying candidates: {candidates}. Last error: {last_error}")
         return None
+
     except Exception as e:
-        # Catching a general exception as defdap might raise various errors
-        print(f"Error processing EBSD data with defdap: {e}")
+        print(f"Unexpected error in load_ebsd_map: {e}")
         return None

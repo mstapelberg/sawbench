@@ -36,6 +36,8 @@ from .elastic import (
     BravaisType,
     EV_A3_TO_GPA,
 )
+from .subregion_selector import SubregionSelector
+from .interactive_ebsd_analysis import interactive_grain_analysis
 
 # Optionally include EBSDAnalyzer if it's considered core functionality
 # from .centroid_finder import EBSDAnalyzer 
@@ -77,5 +79,9 @@ __all__ = [
     "calculate_elastic_tensor_from_vasp",
     "BravaisType",
     "EV_A3_TO_GPA",
+    # From subregion_selector.py
+    "SubregionSelector",
+    # From interactive_ebsd_analysis.py
+    "interactive_grain_analysis",
     # 'EBSDAnalyzer' # Uncomment if EBSDAnalyzer is included
 ] 

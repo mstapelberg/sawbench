@@ -8,6 +8,7 @@ __pycache__/
 
 # data
 examples/data/
+examples/archived/
 
 # Distribution / packaging
 .Python

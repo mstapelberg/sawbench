@@ -26,7 +26,11 @@ from ase.geometry import cellpar_to_cell
 from collections.abc import Callable
 from dataclasses import dataclass
 import os
+import warnings
 from ase.io import read
+
+# Suppress ASE logm warnings during cell relaxation
+warnings.filterwarnings("ignore", message="logm result may be inaccurate", category=RuntimeWarning)
 
 
 EV_A3_TO_GPA = 160.21766208
@@ -690,7 +694,7 @@ def get_elementary_deformations(
         A list of deformed ASE Atoms objects.
     """
     deformation_rules: dict[BravaisType, DeformationRule] = {
-        BravaisType.CUBIC: DeformationRule([0, 3], regular_symmetry),
+        BravaisType.CUBIC: DeformationRule([0, 3, 4, 5], regular_symmetry),
         BravaisType.HEXAGONAL: DeformationRule([0, 2, 3, 5], hexagonal_symmetry),
         BravaisType.TRIGONAL: DeformationRule([0, 1, 2, 3, 4, 5], trigonal_symmetry),
         BravaisType.TETRAGONAL: DeformationRule([0, 2, 3, 5], tetragonal_symmetry),
@@ -894,6 +898,54 @@ def get_elastic_coeffs(
     # Solve least squares problem
     Bij, residuals, rank, singular_values = np.linalg.lstsq(eq_matrix, stress_vector, rcond=None)
 
+    # Debug: Print LS residual and rank
+    print("\n--- Least Squares Debug Information ---")
+    print(f"LS Residual (sum of squared residuals): {residuals[0]:.6e}")
+    print(f"LS Rank: {rank} (out of {eq_matrix.shape[1]} expected coefficients)")
+    print(f"Matrix shape: {eq_matrix.shape}")
+    print(f"Singular values (first 5): {singular_values[:5]}")
+    
+    # Debug: Direct slope check for shear (σyz vs γyz)
+    print("\n--- Shear Slope Check (σyz vs γyz) ---")
+    # Find shear deformations (axis 3 = yz shear)
+    shear_indices = []
+    for i, deformed in enumerate(deformed_atoms):
+        strain = get_strain(deformed, reference_atoms=atoms)
+        if abs(strain[3]) > 1e-8:  # yz shear strain component
+            shear_indices.append(i)
+    
+    if shear_indices:
+        print(f"Found {len(shear_indices)} yz shear deformations")
+        for i in shear_indices:
+            strain = get_strain(deformed_atoms[i], reference_atoms=atoms)
+            stress = corrected_stresses[i]
+            print(f"  Strain γyz = {strain[3]:.6f}, Stress σyz = {stress[3]:.6f}")
+        
+        # Calculate slope if we have multiple points
+        if len(shear_indices) >= 2:
+            shear_strains = [get_strain(deformed_atoms[i], reference_atoms=atoms)[3] for i in shear_indices]
+            shear_stresses = [corrected_stresses[i][3] for i in shear_indices]
+            # Fit linear relationship: σyz = C44 * γyz
+            slope = np.polyfit(shear_strains, shear_stresses, 1)[0]
+            print(f"  Direct slope (C44 estimate): {slope:.6f} eV/Å³")
+            print(f"  Direct slope (C44 estimate): {slope * EV_A3_TO_GPA:.2f} GPa")
+    else:
+        print("No yz shear deformations found in this calculation")
+
+    # Debug: Energy-based C44 calculation (if calculator is available)
+    print("\n--- Energy-Based C44 Check ---")
+    try:
+        # Try to get calculator from first deformed atoms (if available)
+        if deformed_atoms and hasattr(deformed_atoms[0], 'calc') and deformed_atoms[0].calc is not None:
+            calculator = deformed_atoms[0].calc
+            c44_energy = c44_from_energy(calculator, atoms, gamma_max=0.01, n=5, axis=3)
+            print(f"  Energy-based C44: {c44_energy:.6f} eV/Å³")
+            print(f"  Energy-based C44: {c44_energy * EV_A3_TO_GPA:.2f} GPa")
+        else:
+            print("  No calculator available for energy-based C44 calculation")
+    except Exception as e:
+        print(f"  Energy-based C44 calculation failed: {e}")
+
     # Calculate elastic constants with pressure correction
     p = base_pressure
     pressure_corrections = {
@@ -1078,7 +1130,7 @@ def calculate_elastic_tensor(
         stresses[i] = full_3x3_to_voigt_6_stress(stress)
 
     # Calculate elastic tensor
-    C_ij, _ = get_elastic_coeffs(
+    C_ij, (Bij, residuals, rank, singular_values) = get_elastic_coeffs(
         atoms, deformations, stresses, ref_pressure, bravais_type
     )
     C = get_elastic_tensor_from_coeffs(C_ij, bravais_type)
@@ -1186,6 +1238,45 @@ def relax_atoms(
     return cell_filter.atoms
 
 
+def c44_from_energy(calculator, atoms, gamma_max=0.01, n=5, axis=3):
+    """Calculate C44 directly from energy-strain relationship.
+    
+    This helper function computes C44 by fitting the quadratic relationship
+    between shear strain and energy: ΔE/V = 0.5*C44*γ^2
+    
+    Args:
+        calculator: ASE calculator to use for energy calculations
+        atoms: Reference Atoms object
+        gamma_max: Maximum shear strain magnitude
+        n: Number of strain points (excluding zero)
+        axis: Strain axis (3=yz, 4=xz, 5=xy)
+        
+    Returns:
+        float: C44 in eV/Å^3
+    """
+    gammas = np.linspace(-gamma_max, gamma_max, n)
+    gammas = gammas[gammas != 0]  # drop zero
+    V0 = atoms.get_volume()
+    E0 = None
+    g2, dEv = [], []
+    for g in gammas:
+        deformed = get_cart_deformed_cell(atoms, axis=axis, size=g)
+        deformed.calc = calculator
+        E = deformed.get_potential_energy()
+        if E0 is None:
+            # compute E0 on the undeformed cell with same calculator
+            atoms0 = atoms.copy()
+            atoms0.calc = calculator
+            E0 = atoms0.get_potential_energy()
+        g2.append(g*g)
+        dEv.append((E - E0) / V0)
+    g2 = np.array(g2)
+    dEv = np.array(dEv)
+    slope, *_ = np.linalg.lstsq(g2[:,None], dEv, rcond=None)
+    C44_eV_A3 = float(2.0 * slope[0])   # ΔE/V = 0.5*C44*γ^2
+    return C44_eV_A3
+
+
 def calculate_elastic_tensor_from_vasp(
     directory_path: str,
     strain_amount: float,
@@ -1261,7 +1352,7 @@ def calculate_elastic_tensor_from_vasp(
     stresses_np = np.array(stresses_voigt, dtype=np.float64)
 
     # Calculate elastic tensor
-    C_ij, _ = get_elastic_coeffs(
+    C_ij, (Bij, residuals, rank, singular_values) = get_elastic_coeffs(
         reference_atoms, deformed_configs, stresses_np, ref_pressure, bravais_type
     )
     C_tensor = get_elastic_tensor_from_coeffs(C_ij, bravais_type)
@@ -1398,7 +1489,7 @@ if __name__ == "__main__":
     fake_stresses_flat = A_matrix_flat @ C_known
     fake_stresses = fake_stresses_flat.reshape(-1, 6)
     
-    C_calc, _ = get_elastic_coeffs(cubic_ref, cubic_deformations_coeffs, fake_stresses, 0.0, BravaisType.CUBIC)
+    C_calc, (Bij, residuals, rank, singular_values) = get_elastic_coeffs(cubic_ref, cubic_deformations_coeffs, fake_stresses, 0.0, BravaisType.CUBIC)
     
     assert np.allclose(C_known, C_calc, atol=1e-5)
     print("Elastic coefficient calculation: ... PASSED")
@@ -1491,7 +1582,7 @@ if __name__ == "__main__":
     expected_K = 144.0  # GPa
     expected_G = 43.0   # GPa
     
-    print(f"\n--- Validation Against Expected MACE Results for Copper ---")
+    print("\n--- Validation Against Expected MACE Results for Copper ---")
     print(f"Expected Bulk Modulus: ~{expected_K} GPa (Calculated: {K:.2f} GPa)")
     print(f"Expected Shear Modulus: ~{expected_G} GPa (Calculated: {G:.2f} GPa)")
 

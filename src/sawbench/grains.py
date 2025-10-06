@@ -1,9 +1,15 @@
+import os
 import numpy as np
 import pandas as pd
 import scipy.signal as sig
 import scipy.optimize as opt
 from tqdm import tqdm
+try:
+    from tqdm.contrib.concurrent import process_map as _process_map
+except Exception:  # pragma: no cover - optional dependency path
+    _process_map = None
 from typing import TYPE_CHECKING, Tuple, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .materials import Material # Assuming Material class is in this relative path
 from .saw_calculator import SAWCalculator # Assuming SAWCalculator is in this relative path
@@ -120,13 +126,38 @@ def extract_experimental_peak_parameters(
     return output_params
 
 
+def _compute_peak_saw_freq_for_euler(args_tuple: Tuple[Material, np.ndarray, float, float, int, int]) -> float:
+    """Worker function to compute peak SAW frequency (Hz) for a given Euler orientation.
+
+    Args tuple:
+        (material, euler_angles_rad, wavelength, saw_calc_angle_deg, saw_calc_sampling, saw_calc_psaw)
+
+    Returns:
+        float: Peak SAW frequency (Hz), or NaN on failure
+    """
+    material, euler_angles_rad, wavelength, saw_calc_angle_deg, saw_calc_sampling, saw_calc_psaw = args_tuple
+    try:
+        calculator = SAWCalculator(material, euler_angles_rad)
+        v_mps, _, _ = calculator.get_saw_speed(
+            saw_calc_angle_deg,
+            sampling=saw_calc_sampling,
+            psaw=saw_calc_psaw
+        )
+        if v_mps and len(v_mps) > 0 and pd.notna(v_mps[0]):
+            return float(v_mps[0] / wavelength)
+    except Exception:
+        pass
+    return float('nan')
+
+
 def calculate_saw_frequencies_for_ebsd_grains(
     ebsd_map_obj: "ebsd.Map",
     material: Material,
     wavelength: float,
     saw_calc_angle_deg: float = 0.0,
     saw_calc_sampling: int = 400,
-    saw_calc_psaw: int = 0
+    saw_calc_psaw: int = 0,
+    num_workers: Optional[int] = None
 ) -> pd.DataFrame:
     """
     Calculates SAW frequencies for each grain in a processed EBSD map from defdap.
@@ -141,6 +172,9 @@ def calculate_saw_frequencies_for_ebsd_grains(
                                   Defaults to 0.0.
         saw_calc_sampling (int): Sampling parameter for SAWCalculator. Defaults to 400.
         saw_calc_psaw (int): Psaw parameter for SAWCalculator. Defaults to 0.
+        num_workers (Optional[int]): Number of parallel worker processes to use.
+            - If None, checks environment variable 'SAWBENCH_NUM_WORKERS'.
+            - If neither is set, defaults to 1 (serial).
 
     Returns:
         pd.DataFrame: DataFrame containing:
@@ -161,37 +195,119 @@ def calculate_saw_frequencies_for_ebsd_grains(
             "Size (pixels)", "Size (um^2)", "Peak SAW Frequency (Hz)"
         ])
 
-    for grain in tqdm(ebsd_map_obj.grainList, desc="Calculating SAW for EBSD grains", unit="grain"):
-        grain.calcAverageOri() # Ensure average orientation is calculated
-        euler_angles_rad = grain.refOri.eulerAngles()
+    def _normalize_bunge_euler_angles(euler_angles_rad: np.ndarray) -> np.ndarray:
+        """Normalize Bunge Euler angles to canonical ranges.
 
-        peak_saw_freq_hz = np.nan
+        - phi1, phi2 in [0, 2π)
+        - PHI in [0, π] with (phi1, PHI, phi2) ~ (phi1+π, 2π-PHI, phi2+π)
+        """
+        two_pi = 2 * np.pi
+        phi1 = float(np.mod(euler_angles_rad[0], two_pi))
+        PHI_raw = float(np.mod(euler_angles_rad[1], two_pi))
+        phi2 = float(np.mod(euler_angles_rad[2], two_pi))
+
+        if PHI_raw > np.pi:
+            PHI = two_pi - PHI_raw
+            phi1 = float(np.mod(phi1 + np.pi, two_pi))
+            phi2 = float(np.mod(phi2 + np.pi, two_pi))
+        else:
+            PHI = PHI_raw
+
+        return np.array([phi1, PHI, phi2], dtype=float)
+
+    # Precompute Euler angles and grain meta to avoid pickling heavy EBSD objects
+    grains_meta = []  # (grain_id, euler_angles_rad, size_px, size_um2)
+    for grain in ebsd_map_obj.grainList:
+        grain.calcAverageOri()
+        euler_angles_raw = grain.refOri.eulerAngles()
+        euler_angles_rad = _normalize_bunge_euler_angles(euler_angles_raw)
+        size_px = len(grain.coordList)
+        size_um2 = len(grain.coordList) * (ebsd_map_obj.stepSize**2)
+        grains_meta.append((grain.grainID, euler_angles_rad, size_px, size_um2))
+
+    # Determine parallelism: parameter > environment > default(1)
+    if num_workers is None:
+        num_workers_env = os.getenv("SAWBENCH_NUM_WORKERS")
+        if num_workers_env is not None:
+            try:
+                num_workers = max(1, int(num_workers_env))
+            except ValueError:
+                num_workers = 1
+        else:
+            num_workers = 1
+    else:
         try:
-            # SAWCalculator expects Euler angles in radians
-            calculator = SAWCalculator(material, euler_angles_rad) 
-            v_mps, _, _ = calculator.get_saw_speed(
-                saw_calc_angle_deg, 
-                sampling=saw_calc_sampling, 
-                psaw=saw_calc_psaw
-            )
-            if v_mps and len(v_mps) > 0 and pd.notna(v_mps[0]):
-                peak_saw_freq_hz = v_mps[0] / wavelength
-            else:
-                # print(f"Warning: SAW speed calculation returned no or NaN result for grain {grain.grainID}.") # Can be verbose
-                pass
-        except Exception as e:
-            print(f"Error calculating SAW for grain {grain.grainID} (Euler: {np.rad2deg(euler_angles_rad)}): {e}")
-            pass
+            num_workers = max(1, int(num_workers))
+        except Exception:
+            num_workers = 1
 
-        grains_data_list.append({
-            "Grain ID": grain.grainID,
-            "Euler1 (rad)": euler_angles_rad[0],
-            "Euler2 (rad)": euler_angles_rad[1],
-            "Euler3 (rad)": euler_angles_rad[2],
-            "Size (pixels)": len(grain.coordList), # Number of points in the grain
-            "Size (um^2)": len(grain.coordList) * (ebsd_map_obj.stepSize**2), # Area
-            "Peak SAW Frequency (Hz)": peak_saw_freq_hz
-        })
+    if num_workers == 1:
+        # Original serial path with progress bar
+        for grain_id, euler_angles_rad, size_px, size_um2 in tqdm(grains_meta, desc="Calculating SAW for EBSD grains", unit="grain"):
+            peak_saw_freq_hz = np.nan
+            try:
+                calculator = SAWCalculator(material, euler_angles_rad)
+                v_mps, _, _ = calculator.get_saw_speed(
+                    saw_calc_angle_deg,
+                    sampling=saw_calc_sampling,
+                    psaw=saw_calc_psaw
+                )
+                if v_mps and len(v_mps) > 0 and pd.notna(v_mps[0]):
+                    peak_saw_freq_hz = v_mps[0] / wavelength
+            except Exception as e:
+                # Preserve prior behavior of reporting errors per grain
+                print(f"Error calculating SAW for grain {grain_id} (Euler: {np.rad2deg(euler_angles_rad)}): {e}")
+
+            grains_data_list.append({
+                "Grain ID": grain_id,
+                "Euler1 (rad)": euler_angles_rad[0],
+                "Euler2 (rad)": euler_angles_rad[1],
+                "Euler3 (rad)": euler_angles_rad[2],
+                "Size (pixels)": size_px,
+                "Size (um^2)": size_um2,
+                "Peak SAW Frequency (Hz)": peak_saw_freq_hz
+            })
+    else:
+        # Parallel path using tqdm's process_map if available; fallback to ProcessPoolExecutor
+        args_list = [
+            (material, euler_angles_rad, wavelength, saw_calc_angle_deg, saw_calc_sampling, saw_calc_psaw)
+            for (_, euler_angles_rad, _, _) in grains_meta
+        ]
+
+        if _process_map is not None:
+            peak_freqs = _process_map(
+                _compute_peak_saw_freq_for_euler,
+                args_list,
+                max_workers=num_workers,
+                chunksize=1,
+                desc="Calculating SAW for EBSD grains"
+            )
+        else:
+            peak_freqs = [np.nan] * len(grains_meta)
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                futures = {}
+                for idx, args_tuple in enumerate(args_list):
+                    fut = executor.submit(_compute_peak_saw_freq_for_euler, args_tuple)
+                    futures[fut] = idx
+
+                for fut in tqdm(as_completed(futures), total=len(futures), desc="Calculating SAW for EBSD grains", unit="grain"):
+                    idx = futures[fut]
+                    try:
+                        peak_freqs[idx] = float(fut.result())
+                    except Exception:
+                        peak_freqs[idx] = float('nan')
+
+        # Assemble output rows
+        for (grain_id, euler_angles_rad, size_px, size_um2), f_hz in zip(grains_meta, peak_freqs):
+            grains_data_list.append({
+                "Grain ID": grain_id,
+                "Euler1 (rad)": euler_angles_rad[0],
+                "Euler2 (rad)": euler_angles_rad[1],
+                "Euler3 (rad)": euler_angles_rad[2],
+                "Size (pixels)": size_px,
+                "Size (um^2)": size_um2,
+                "Peak SAW Frequency (Hz)": f_hz
+            })
 
     df_grains = pd.DataFrame(grains_data_list)
     return df_grains
