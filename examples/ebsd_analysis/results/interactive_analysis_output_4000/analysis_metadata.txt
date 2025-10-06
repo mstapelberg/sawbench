@@ -1,0 +1,31 @@
+EBSD Grain Analysis Metadata
+==================================================
+
+CTF File: ../data/V-1_2Ti_EBSD_Map.ctf
+Material: V
+Wavelength: 8.800 μm
+SAW Angle: 135.0°
+
+Total Grains: 616
+Grains in ROI: 472
+Valid Frequencies (All): 616
+Valid Frequencies (ROI): 472
+
+Frequency Range (All): 288.00 - 307.84 MHz
+Frequency Range (ROI): 288.00 - 307.84 MHz
+
+Euler Angle Statistics (degrees):
+All Grains:
+  φ₁: 0.0 - 359.2 (mean: 172.0)
+  Φ:  0.8 - 173.9 (mean: 31.8)
+  φ₂: 0.6 - 359.4 (mean: 49.0)
+ROI Grains:
+  φ₁: 0.5 - 359.2 (mean: 172.1)
+  Φ:  0.8 - 173.9 (mean: 32.0)
+  φ₂: 0.6 - 359.4 (mean: 48.5)
+
+Selected Region Vertices:
+  1: (579.60, 6078.84) μm
+  2: (6488.25, 6110.50) μm
+  3: (6287.78, 444.52) μm
+  4: (569.05, 465.63) μm
