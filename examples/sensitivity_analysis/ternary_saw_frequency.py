@@ -30,7 +30,10 @@ from __future__ import annotations
 
 import os
 import argparse
-from typing import Tuple, List, Optional, Dict
+import pickle
+import hashlib
+import warnings
+from typing import Tuple, List, Optional, Dict, Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -44,6 +47,10 @@ from tqdm import tqdm
 from sawbench.materials import Material
 from sawbench.saw_calculator import SAWCalculator
 
+# Suppress numpy linalg warnings for cleaner output
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*divide by zero encountered in det.*')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*invalid value encountered in det.*')
+
 try:
     from sawbench import (
         load_ebsd_map,
@@ -54,6 +61,155 @@ try:
     EBSD_AVAILABLE = True
 except ImportError:
     EBSD_AVAILABLE = False
+
+
+class SAWCache:
+    """Cache for SAW frequency calculations to avoid recomputation."""
+    
+    def __init__(self, cache_file: str = "saw_cache.pkl"):
+        self.cache_file = cache_file
+        self.cache: Dict[str, float] = {}
+        self.load_cache()
+    
+    def _generate_key(self, C11: float, C12: float, C44: float, density: float, 
+                     euler_angles: Tuple[float, float, float], deg_inplane: float,
+                     sampling: int, wavelength: float) -> str:
+        """Generate a unique hash key for the calculation parameters."""
+        key_data = {
+            'C11': round(C11, 6),
+            'C12': round(C12, 6), 
+            'C44': round(C44, 6),
+            'density': round(density, 3),
+            'euler': tuple(round(x, 6) for x in euler_angles),
+            'deg_inplane': round(deg_inplane, 3),
+            'sampling': sampling,
+            'wavelength': round(wavelength, 10)
+        }
+        key_str = str(sorted(key_data.items()))
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def get(self, C11: float, C12: float, C44: float, density: float,
+            euler_angles: Tuple[float, float, float], deg_inplane: float,
+            sampling: int, wavelength: float) -> Optional[float]:
+        """Get cached result if available."""
+        key = self._generate_key(C11, C12, C44, density, euler_angles, deg_inplane, sampling, wavelength)
+        return self.cache.get(key)
+    
+    def set(self, C11: float, C12: float, C44: float, density: float,
+            euler_angles: Tuple[float, float, float], deg_inplane: float,
+            sampling: int, wavelength: float, result: float) -> None:
+        """Cache a result."""
+        key = self._generate_key(C11, C12, C44, density, euler_angles, deg_inplane, sampling, wavelength)
+        self.cache[key] = result
+        self.save_cache()
+
+
+class KSCache:
+    """Cache for KS metric calculations in EBSD mode to avoid recomputation."""
+    
+    def __init__(self, cache_file: str = "ks_cache.pkl"):
+        self.cache_file = cache_file
+        self.cache: Dict[str, float] = {}
+        self.load_cache()
+    
+    def _generate_key(self, C11: float, C12: float, C44: float, density: float,
+                     wavelength: float, deg_inplane: float, sampling: int,
+                     ebsd_hash: str, exp_hash: str) -> str:
+        """Generate a unique hash key for KS calculation parameters."""
+        key_data = {
+            'C11': round(C11, 6),
+            'C12': round(C12, 6),
+            'C44': round(C44, 6),
+            'density': round(density, 3),
+            'wavelength': round(wavelength, 10),
+            'deg_inplane': round(deg_inplane, 3),
+            'sampling': sampling,
+            'ebsd': ebsd_hash,
+            'exp': exp_hash
+        }
+        key_str = str(sorted(key_data.items()))
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def get(self, C11: float, C12: float, C44: float, density: float,
+            wavelength: float, deg_inplane: float, sampling: int,
+            ebsd_hash: str, exp_hash: str) -> Optional[float]:
+        """Get cached KS metric if available."""
+        key = self._generate_key(C11, C12, C44, density, wavelength, deg_inplane, 
+                                 sampling, ebsd_hash, exp_hash)
+        return self.cache.get(key)
+    
+    def set(self, C11: float, C12: float, C44: float, density: float,
+            wavelength: float, deg_inplane: float, sampling: int,
+            ebsd_hash: str, exp_hash: str, ks_value: float) -> None:
+        """Cache a KS metric result."""
+        key = self._generate_key(C11, C12, C44, density, wavelength, deg_inplane,
+                                 sampling, ebsd_hash, exp_hash)
+        self.cache[key] = ks_value
+        self.save_cache()
+    
+    def load_cache(self) -> None:
+        """Load cache from disk."""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'rb') as f:
+                    self.cache = pickle.load(f)
+                print(f"Loaded {len(self.cache)} cached KS calculations from {self.cache_file}")
+            except Exception as e:
+                print(f"Warning: Could not load cache file {self.cache_file}: {e}")
+                self.cache = {}
+        else:
+            self.cache = {}
+    
+    def save_cache(self) -> None:
+        """Save cache to disk."""
+        try:
+            # Create directory if it doesn't exist
+            cache_dir = os.path.dirname(self.cache_file)
+            if cache_dir and not os.path.exists(cache_dir):
+                os.makedirs(cache_dir, exist_ok=True)
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(self.cache, f)
+        except Exception as e:
+            print(f"Warning: Could not save cache to {self.cache_file}: {e}")
+    
+    def clear_cache(self) -> None:
+        """Clear the cache."""
+        self.cache = {}
+        if os.path.exists(self.cache_file):
+            os.remove(self.cache_file)
+        print("Cache cleared.")
+    
+    def cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        total_entries = len(self.cache)
+        finite_entries = sum(1 for v in self.cache.values() if np.isfinite(v))
+        nan_entries = total_entries - finite_entries
+        return {
+            'total_entries': total_entries,
+            'finite_entries': finite_entries,
+            'nan_entries': nan_entries,
+            'cache_file': self.cache_file
+        }
+
+
+# Global cache instances
+_saw_cache = None
+_ks_cache = None
+
+def get_ks_cache(cache_file: str = "ks_cache.pkl") -> KSCache:
+    """Get or create the global KS cache instance."""
+    global _ks_cache
+    if _ks_cache is None or _ks_cache.cache_file != cache_file:
+        _ks_cache = KSCache(cache_file)
+    return _ks_cache
+
+
+def get_saw_cache(cache_file: str = "saw_cache.pkl") -> SAWCache:
+    """Get or create the global SAW cache instance."""
+    global _saw_cache
+    if _saw_cache is None:
+        _saw_cache = SAWCache(cache_file)
+    return _saw_cache
 
 
 def generate_ternary_grid(resolution: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -85,11 +241,24 @@ def compute_saw_frequency_mhz(
     deg_inplane: float = 0.0,
     sampling: int = 400,
     wavelength_m: float = 8.8e-6,
+    use_cache: bool = True,
+    cache_file: str = "saw_cache.pkl",
 ) -> float:
     """Compute predicted SAW frequency (MHz) for given elastic constants and density.
 
     Returns NaN on failure.
     """
+    # Check cache first
+    if use_cache:
+        cache = get_saw_cache(cache_file)
+        cached_result = cache.get(
+            C11_GPa, C12_GPa, C44_GPa, density_kg_m3,
+            euler_angles_rad, deg_inplane, sampling, wavelength_m
+        )
+        if cached_result is not None:
+            return float(cached_result)
+    
+    # Compute result
     try:
         material = Material(
             formula="Cubic",
@@ -125,13 +294,32 @@ def compute_saw_frequency_mhz(
                     use_optimized=False,
                 )
             except Exception:
-                return float("nan")
+                result = float("nan")
+                # Cache the NaN result to avoid recomputation
+                if use_cache:
+                    cache.set(C11_GPa, C12_GPa, C44_GPa, density_kg_m3,
+                             euler_angles_rad, deg_inplane, sampling, wavelength_m, result)
+                return result
 
         if v is None or len(v) == 0 or not np.isfinite(v[0]):
-            return float("nan")
-        return float(v[0] / wavelength_m / 1e6)  # MHz
+            result = float("nan")
+        else:
+            result = float(v[0] / wavelength_m / 1e6)  # MHz
+        
+        # Cache the result
+        if use_cache:
+            cache.set(C11_GPa, C12_GPa, C44_GPa, density_kg_m3,
+                     euler_angles_rad, deg_inplane, sampling, wavelength_m, result)
+        
+        return result
     except Exception:
-        return float("nan")
+        result = float("nan")
+        # Cache the NaN result to avoid recomputation
+        if use_cache:
+            cache = get_saw_cache(cache_file)
+            cache.set(C11_GPa, C12_GPa, C44_GPa, density_kg_m3,
+                     euler_angles_rad, deg_inplane, sampling, wavelength_m, result)
+        return result
 
 
 def format_gpa(value: float) -> str:
@@ -208,6 +396,28 @@ def compute_ks_metric(exp_mhz: np.ndarray, pred_mhz: np.ndarray) -> float:
         return float("nan")
     ks_stat, _ = ks_2samp(exp, pred)
     return float(ks_stat)
+
+
+def generate_ebsd_hash(ebsd_path: str) -> str:
+    """Generate a hash for EBSD data file."""
+    # Use file path + file size + modification time for hash
+    try:
+        stat = os.stat(ebsd_path)
+        hash_str = f"{ebsd_path}_{stat.st_size}_{stat.st_mtime}"
+        return hashlib.md5(hash_str.encode()).hexdigest()[:16]
+    except:
+        return hashlib.md5(ebsd_path.encode()).hexdigest()[:16]
+
+
+def generate_exp_hash(exp_h5_path: str, min_mhz: float, max_mhz: float) -> str:
+    """Generate a hash for experimental data."""
+    try:
+        stat = os.stat(exp_h5_path)
+        hash_str = f"{exp_h5_path}_{stat.st_size}_{stat.st_mtime}_{min_mhz}_{max_mhz}"
+        return hashlib.md5(hash_str.encode()).hexdigest()[:16]
+    except:
+        hash_str = f"{exp_h5_path}_{min_mhz}_{max_mhz}"
+        return hashlib.md5(hash_str.encode()).hexdigest()[:16]
 
 
 def auto_calibrate_relative_range(finite_values: np.ndarray) -> float:
@@ -529,8 +739,9 @@ def create_ternary_plot(
             except Exception:
                 pass
 
-    # Set title
-    ax.set_title(title, pad=20)
+    # Set title if provided
+    if title:
+        ax.set_title(title, pad=20)
 
     # Use tight layout; no right adjustment needed with inset colorbar
     plt.tight_layout()
@@ -583,8 +794,45 @@ def main() -> None:
     parser.add_argument("--exp_min_mhz", type=float, default=200.0, help="Minimum experimental frequency in MHz (default: 200.0)")
     parser.add_argument("--exp_max_mhz", type=float, default=400.0, help="Maximum experimental frequency in MHz (default: 400.0)")
     parser.add_argument("--num_workers", type=int, default=32, help="Number of parallel workers for EBSD grain calculations (default: 32)")
+    
+    # Cache management arguments
+    parser.add_argument("--cache_file", type=str, default="saw_cache.pkl", help="Path to cache file (default: saw_cache.pkl)")
+    parser.add_argument("--no_cache", action="store_true", help="Disable caching")
+    parser.add_argument("--clear_cache", action="store_true", help="Clear the cache and exit")
+    parser.add_argument("--cache_stats", action="store_true", help="Show cache statistics and exit")
+    
+    # Display options
+    parser.add_argument("--show_title", action="store_true", help="Show plot title (default: no title)")
 
     args = parser.parse_args()
+
+    # Handle cache management commands
+    if args.clear_cache:
+        # Try to detect cache type from filename or clear both
+        if 'ks' in args.cache_file.lower():
+            cache = get_ks_cache(args.cache_file)
+        else:
+            cache = get_saw_cache(args.cache_file)
+        cache.clear_cache()
+        return
+    
+    if args.cache_stats:
+        # Try to detect cache type from filename
+        if 'ks' in args.cache_file.lower():
+            cache = get_ks_cache(args.cache_file)
+            cache_type = "KS"
+        else:
+            cache = get_saw_cache(args.cache_file)
+            cache_type = "SAW"
+        stats = cache.cache_stats()
+        print(f"{cache_type} Cache Statistics:")
+        print(f"  File: {stats['cache_file']}")
+        print(f"  Total entries: {stats['total_entries']}")
+        print(f"  Finite results: {stats['finite_entries']}")
+        print(f"  NaN results: {stats['nan_entries']}")
+        if stats['total_entries'] > 0:
+            print(f"  Success rate: {stats['finite_entries']/stats['total_entries']*100:.1f}%")
+        return
 
     # Validate mutually exclusive modes
     if args.ks_mode and args.relative:
@@ -600,7 +848,7 @@ def main() -> None:
             parser.error("--ks_mode requires --experimental_h5")
         # Update default title and output file for KS mode if not explicitly set
         if args.title == "SAW Frequency vs C11/C12/C44 (±50%)":
-            args.title = "KS Metric Sensitivity vs K/D/G (±50%)" if args.plot_kdg else "KS Metric Sensitivity vs C11/C12/C44 (±50%)"
+            args.title = "KS Metric vs K/D/G (±50%)" if args.plot_kdg else "KS Metric vs C11/C12/C44 (±50%)"
         if args.outfile == os.path.join(os.path.dirname(__file__), "results", "ternary_saw_frequency.png"):
             args.outfile = os.path.join(os.path.dirname(__file__), "results", "ternary_ks_sensitivity.png")
 
@@ -608,6 +856,7 @@ def main() -> None:
     base_c12 = float(args.c12_base_gpa)
     base_c44 = float(args.c44_base_gpa)
     plot_kdg = bool(args.plot_kdg)
+    ks_mode = bool(args.ks_mode)
     density = float(args.density)
     wavelength_m = float(args.wavelength_um) * 1e-6
     deg_inplane = float(args.deg)
@@ -624,8 +873,15 @@ def main() -> None:
         cmap_name = LinearSegmentedColormap.from_list('custom_diverging', colors_list, N=n_bins)
     
     outfile = None if args.outfile == "-" else str(args.outfile)
-    focus_range = (float(args.focus_low_mhz), float(args.focus_high_mhz))
-    scale = str(args.scale)
+    
+    # For KS mode, use a focused range of 0-1 and linear scale by default
+    if ks_mode:
+        focus_range = (0.0, 1.0)
+        scale = "linear"  # Linear scale for KS metric
+    else:
+        focus_range = (float(args.focus_low_mhz), float(args.focus_high_mhz))
+        scale = str(args.scale)
+    
     power_gamma = float(args.power_gamma)
     rel_max_percent = args.rel_max_percent
 
@@ -663,7 +919,8 @@ def main() -> None:
         az_values[valid_mask] = 2.0 * C44_arr[valid_mask] / denom[valid_mask]
 
     # Main computation: either frequency-based or KS metric-based
-    ks_mode = bool(args.ks_mode)
+    use_cache = not bool(args.no_cache)
+    cache_file = str(args.cache_file)
     freq_mhz = np.full_like(t, np.nan, dtype=float)
     valid_indices = np.where(valid_mask)[0]
     
@@ -707,14 +964,40 @@ def main() -> None:
         baseline_str = f"{baseline_ks:.4f}" if np.isfinite(baseline_ks) else "N/A"
         print(f"Baseline KS metric: {baseline_str}")
         
+        # Initialize KS cache
+        if use_cache:
+            ks_cache = get_ks_cache(cache_file)
+            ebsd_hash = generate_ebsd_hash(args.ebsd_path)
+            exp_hash = generate_exp_hash(args.experimental_h5, args.exp_min_mhz, args.exp_max_mhz)
+            stats = ks_cache.cache_stats()
+            print(f"KS cache loaded: {stats['total_entries']} entries from {cache_file}")
+        
         # Compute KS metric for each valid K/D/G combination
         print(f"--- KS Mode: Computing KS metrics for {len(valid_indices)} grid points ---")
+        cache_hits = 0
         for idx in tqdm(valid_indices, desc="KS metrics"):
+            C11_gpa = float(C11_arr[idx])
+            C12_gpa = float(C12_arr[idx])
+            C44_gpa = float(C44_arr[idx])
+            
+            # Check cache first
+            if use_cache:
+                cached_ks = ks_cache.get(
+                    C11_gpa, C12_gpa, C44_gpa, density,
+                    wavelength_m, deg_inplane, sampling,
+                    ebsd_hash, exp_hash
+                )
+                if cached_ks is not None:
+                    freq_mhz[idx] = cached_ks
+                    cache_hits += 1
+                    continue
+            
+            # Compute if not cached
             material_props_pa = {
                 'formula': 'Cubic',
-                'C11': float(C11_arr[idx]) * 1e9,
-                'C12': float(C12_arr[idx]) * 1e9,
-                'C44': float(C44_arr[idx]) * 1e9,
+                'C11': C11_gpa * 1e9,
+                'C12': C12_gpa * 1e9,
+                'C44': C44_gpa * 1e9,
                 'density': density,
                 'crystal_class': 'cubic',
             }
@@ -722,27 +1005,47 @@ def main() -> None:
                 ebsd_map, material_props_pa, wavelength_m, deg_inplane,
                 sampling, 0, args.num_workers
             )
-            freq_mhz[idx] = compute_ks_metric(exp_mhz, pred_mhz)
+            ks_value = compute_ks_metric(exp_mhz, pred_mhz)
+            freq_mhz[idx] = ks_value
+            
+            # Cache the result
+            if use_cache:
+                ks_cache.set(
+                    C11_gpa, C12_gpa, C44_gpa, density,
+                    wavelength_m, deg_inplane, sampling,
+                    ebsd_hash, exp_hash, ks_value
+                )
         
-        # Convert to normalized change in KS metric
-        cbar_label = "Normalized change in KS metric ΔKS/KS₀"
-        if np.isfinite(baseline_ks) and baseline_ks != 0.0:
-            with np.errstate(divide='ignore', invalid='ignore'):
-                freq_ks_rel = (freq_mhz - baseline_ks) / baseline_ks
-            if np.any(np.isfinite(freq_ks_rel)):
-                freq_mhz = freq_ks_rel
-                # Use custom diverging colormap
-                if not isinstance(cmap_name, str) or cmap_name != "custom":
-                    colors_list = ['#2A33C3', 'white', '#8F2D56']  # blue to white to red
-                    n_bins = 256
-                    cmap_name = LinearSegmentedColormap.from_list('custom_diverging', colors_list, N=n_bins)
+        if use_cache:
+            print(f"Cache hits: {cache_hits}/{len(valid_indices)} ({cache_hits/len(valid_indices)*100:.1f}%)")
         
-        relative_mode = True  # Treat as relative mode for plotting purposes
+        # Plot raw KS metric (ranges from 0 to 1)
+        # Lower KS is better (distributions are more similar), so use reversed colormap
+        cbar_label = "Kolmogorov-Smirnov metric"
+        relative_mode = False  # Use absolute scale for KS metric
+        
+        # Use a reversed viridis colormap (purple=low/good, yellow=high/bad)
+        if not isinstance(cmap_name, str):
+            pass  # Keep custom colormap if already set
+        elif cmap_name == "custom":
+            # Use green (good) to red (bad) colormap for KS
+            colors_list = ['#2A9D8F', '#E9C46A', '#E76F51']  # green to yellow to red
+            n_bins = 256
+            cmap_name = LinearSegmentedColormap.from_list('ks_colormap', colors_list, N=n_bins)
+        else:
+            cmap_name = cmap_name + "_r"  # Reverse the colormap
         
     else:
         # Original frequency-based mode
-        print(f"--- Computing SAW frequencies for {len(valid_indices)} grid points ---")
-        for idx in valid_indices:
+        if use_cache:
+            cache = get_saw_cache(cache_file)
+            stats = cache.cache_stats()
+            print(f"--- Computing SAW frequencies for {len(valid_indices)} grid points ---")
+            print(f"Using cache: {stats['total_entries']} entries loaded")
+        else:
+            print(f"--- Computing SAW frequencies for {len(valid_indices)} grid points (no cache) ---")
+        
+        for idx in tqdm(valid_indices, desc="SAW frequencies"):
             freq_mhz[idx] = compute_saw_frequency_mhz(
                 float(C11_arr[idx]), float(C12_arr[idx]), float(C44_arr[idx]),
                 density_kg_m3=density,
@@ -750,6 +1053,8 @@ def main() -> None:
                 deg_inplane=deg_inplane,
                 sampling=sampling,
                 wavelength_m=wavelength_m,
+                use_cache=use_cache,
+                cache_file=cache_file,
             )
 
         # Baseline frequency at the base constants
@@ -760,6 +1065,8 @@ def main() -> None:
             deg_inplane=deg_inplane,
             sampling=sampling,
             wavelength_m=wavelength_m,
+            use_cache=use_cache,
+            cache_file=cache_file,
         )
         baseline_str = f"{baseline_freq:.1f} MHz" if np.isfinite(baseline_freq) else "N/A"
 
@@ -780,32 +1087,36 @@ def main() -> None:
                     n_bins = 256
                     cmap_name = LinearSegmentedColormap.from_list('custom_diverging', colors_list, N=n_bins)
 
-    if plot_kdg:
-        if ks_mode:
-            title = (
-                args.title
-                + f"\nBase: K={(base_k if base_k is not None else 0):.1f} GPa, D={(base_d if base_d is not None else 0):.1f} GPa, G={(base_g if base_g is not None else 0):.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
-                + f"\nψ={deg_inplane:.1f}°; baseline KS₀={baseline_str}"
-            )
+    # Build title if requested
+    if args.show_title:
+        if plot_kdg:
+            if ks_mode:
+                title = (
+                    args.title
+                    + f"\nBase: K={(base_k if base_k is not None else 0):.1f} GPa, D={(base_d if base_d is not None else 0):.1f} GPa, G={(base_g if base_g is not None else 0):.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
+                    + f"\nψ={deg_inplane:.1f}°; baseline KS₀={baseline_str}"
+                )
+            else:
+                title = (
+                    args.title
+                    + f"\nBase: K={(base_k if base_k is not None else 0):.1f} GPa, D={(base_d if base_d is not None else 0):.1f} GPa, G={(base_g if base_g is not None else 0):.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
+                    + f"\nEuler=(α={euler_deg[0]:.1f}°, β={euler_deg[1]:.1f}°, γ={euler_deg[2]:.1f}°); baseline f₀={baseline_str}"
+                )
         else:
-            title = (
-                args.title
-                + f"\nBase: K={(base_k if base_k is not None else 0):.1f} GPa, D={(base_d if base_d is not None else 0):.1f} GPa, G={(base_g if base_g is not None else 0):.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
-                + f"\nEuler=(α={euler_deg[0]:.1f}°, β={euler_deg[1]:.1f}°, γ={euler_deg[2]:.1f}°); baseline f₀={baseline_str}"
-            )
+            if ks_mode:
+                title = (
+                    args.title
+                    + f"\nBase: C11={base_c11:.1f} GPa, C12={base_c12:.1f} GPa, C44={base_c44:.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
+                    + f"\nψ={deg_inplane:.1f}°; baseline KS₀={baseline_str}"
+                )
+            else:
+                title = (
+                    args.title
+                    + f"\nBase: C11={base_c11:.1f} GPa, C12={base_c12:.1f} GPa, C44={base_c44:.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
+                    + f"\nEuler=(α={euler_deg[0]:.1f}°, β={euler_deg[1]:.1f}°, γ={euler_deg[2]:.1f}°); baseline f₀={baseline_str}"
+                )
     else:
-        if ks_mode:
-            title = (
-                args.title
-                + f"\nBase: C11={base_c11:.1f} GPa, C12={base_c12:.1f} GPa, C44={base_c44:.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
-                + f"\nψ={deg_inplane:.1f}°; baseline KS₀={baseline_str}"
-            )
-        else:
-            title = (
-                args.title
-                + f"\nBase: C11={base_c11:.1f} GPa, C12={base_c12:.1f} GPa, C44={base_c44:.1f} GPa; density={density:.0f} kg/m³; λ={args.wavelength_um:.2f} µm"
-                + f"\nEuler=(α={euler_deg[0]:.1f}°, β={euler_deg[1]:.1f}°, γ={euler_deg[2]:.1f}°); baseline f₀={baseline_str}"
-            )
+        title = ""  # No title
 
     create_ternary_plot(
         t, l, r, freq_mhz,
@@ -829,6 +1140,21 @@ def main() -> None:
         base_g=base_g,
         rel_max_percent=rel_max_percent,
     )
+    
+    # Show final cache statistics
+    if use_cache:
+        if ks_mode:
+            cache = get_ks_cache(cache_file)
+        else:
+            cache = get_saw_cache(cache_file)
+        stats = cache.cache_stats()
+        print(f"\nFinal cache statistics:")
+        print(f"  Total entries: {stats['total_entries']}")
+        print(f"  Finite results: {stats['finite_entries']}")
+        print(f"  NaN results: {stats['nan_entries']}")
+        if stats['total_entries'] > 0:
+            print(f"  Success rate: {stats['finite_entries']/stats['total_entries']*100:.1f}%")
+        print(f"  Cache file: {stats['cache_file']}")
 
 
 if __name__ == "__main__":
