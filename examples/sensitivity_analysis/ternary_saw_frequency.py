@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import argparse
 import pickle
+import json
 import hashlib
 import warnings
 from typing import Tuple, List, Optional, Dict, Any
@@ -105,54 +106,82 @@ class SAWCache:
 
 
 class KSCache:
-    """Cache for KS metric calculations in EBSD mode to avoid recomputation."""
+    """Cache for KS metric calculations: maps (K, D, G, EBSD, Exp) → KS metric.
     
-    def __init__(self, cache_file: str = "ks_cache.pkl"):
+    Computational parameters (sampling, wavelength, angle) are NOT included in the key,
+    allowing you to identify best K/D/G combinations and recompute with different parameters.
+    """
+    
+    def __init__(self, cache_file: str = "ks_cache.json"):
         self.cache_file = cache_file
-        self.cache: Dict[str, float] = {}
+        self.cache: Dict[str, Dict[str, Any]] = {}  # key -> {KS, K, D, G, metadata}
+        self.pending_writes: Dict[str, Dict[str, Any]] = {}
         self.load_cache()
     
-    def _generate_key(self, C11: float, C12: float, C44: float, density: float,
-                     wavelength: float, deg_inplane: float, sampling: int,
+    def _generate_key(self, C11: float, C12: float, C44: float, 
                      ebsd_hash: str, exp_hash: str) -> str:
-        """Generate a unique hash key for KS calculation parameters."""
+        """Generate key from elastic constants and data hashes only.
+        
+        Excludes: sampling, wavelength, angle (computational parameters)
+        Includes: C11, C12, C44 (material), EBSD hash, Experimental data hash
+        """
         key_data = {
             'C11': round(C11, 6),
             'C12': round(C12, 6),
             'C44': round(C44, 6),
-            'density': round(density, 3),
-            'wavelength': round(wavelength, 10),
-            'deg_inplane': round(deg_inplane, 3),
-            'sampling': sampling,
             'ebsd': ebsd_hash,
             'exp': exp_hash
         }
         key_str = str(sorted(key_data.items()))
         return hashlib.md5(key_str.encode()).hexdigest()
     
-    def get(self, C11: float, C12: float, C44: float, density: float,
-            wavelength: float, deg_inplane: float, sampling: int,
+    def get(self, C11: float, C12: float, C44: float,
             ebsd_hash: str, exp_hash: str) -> Optional[float]:
         """Get cached KS metric if available."""
-        key = self._generate_key(C11, C12, C44, density, wavelength, deg_inplane, 
-                                 sampling, ebsd_hash, exp_hash)
-        return self.cache.get(key)
+        key = self._generate_key(C11, C12, C44, ebsd_hash, exp_hash)
+        entry = self.cache.get(key)
+        return entry['KS'] if entry else None
     
-    def set(self, C11: float, C12: float, C44: float, density: float,
-            wavelength: float, deg_inplane: float, sampling: int,
-            ebsd_hash: str, exp_hash: str, ks_value: float) -> None:
-        """Cache a KS metric result."""
-        key = self._generate_key(C11, C12, C44, density, wavelength, deg_inplane,
-                                 sampling, ebsd_hash, exp_hash)
-        self.cache[key] = ks_value
-        self.save_cache()
+    def set(self, C11: float, C12: float, C44: float,
+            ebsd_hash: str, exp_hash: str, ks_value: float,
+            K: float, D: float, G: float) -> None:
+        """Cache a KS metric result with K/D/G values."""
+        key = self._generate_key(C11, C12, C44, ebsd_hash, exp_hash)
+        
+        # Store full entry with metadata
+        entry = {
+            'KS': ks_value,
+            'K': round(K, 6),
+            'D': round(D, 6),
+            'G': round(G, 6),
+            'C11': round(C11, 6),
+            'C12': round(C12, 6),
+            'C44': round(C44, 6),
+        }
+        
+        self.cache[key] = entry
+        self.pending_writes[key] = entry
+        
+        # Save every 10 entries to reduce I/O
+        if len(self.pending_writes) >= 10:
+            self.flush()
+    
+    def flush(self) -> None:
+        """Flush pending writes to disk."""
+        if self.pending_writes:
+            self.save_cache()
+            self.pending_writes = {}
+    
+    def get_all_entries(self) -> List[Dict[str, Any]]:
+        """Get all cache entries as a list."""
+        return list(self.cache.values())
     
     def load_cache(self) -> None:
-        """Load cache from disk."""
+        """Load cache from disk (JSON format)."""
         if os.path.exists(self.cache_file):
             try:
-                with open(self.cache_file, 'rb') as f:
-                    self.cache = pickle.load(f)
+                with open(self.cache_file, 'r') as f:
+                    self.cache = json.load(f)
                 print(f"Loaded {len(self.cache)} cached KS calculations from {self.cache_file}")
             except Exception as e:
                 print(f"Warning: Could not load cache file {self.cache_file}: {e}")
@@ -161,20 +190,23 @@ class KSCache:
             self.cache = {}
     
     def save_cache(self) -> None:
-        """Save cache to disk."""
+        """Save cache to disk as JSON."""
         try:
             # Create directory if it doesn't exist
             cache_dir = os.path.dirname(self.cache_file)
             if cache_dir and not os.path.exists(cache_dir):
                 os.makedirs(cache_dir, exist_ok=True)
-            with open(self.cache_file, 'wb') as f:
-                pickle.dump(self.cache, f)
+            
+            # Save as JSON for human-readability and stability
+            with open(self.cache_file, 'w') as f:
+                json.dump(self.cache, f, indent=2)
         except Exception as e:
             print(f"Warning: Could not save cache to {self.cache_file}: {e}")
     
     def clear_cache(self) -> None:
         """Clear the cache."""
         self.cache = {}
+        self.pending_writes = {}
         if os.path.exists(self.cache_file):
             os.remove(self.cache_file)
         print("Cache cleared.")
@@ -182,8 +214,14 @@ class KSCache:
     def cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         total_entries = len(self.cache)
-        finite_entries = sum(1 for v in self.cache.values() if np.isfinite(v))
-        nan_entries = total_entries - finite_entries
+        if total_entries > 0:
+            ks_values = [e['KS'] for e in self.cache.values() if 'KS' in e]
+            finite_entries = sum(1 for v in ks_values if np.isfinite(v))
+            nan_entries = total_entries - finite_entries
+        else:
+            finite_entries = 0
+            nan_entries = 0
+        
         return {
             'total_entries': total_entries,
             'finite_entries': finite_entries,
@@ -516,6 +554,7 @@ def create_ternary_plot(
     base_d: Optional[float] = None,
     base_g: Optional[float] = None,
     rel_max_percent: Optional[float] = None,
+    show_baseline_marker: bool = False,
 ) -> None:
     """Create ternary plot using mpltern."""
     
@@ -621,13 +660,13 @@ def create_ternary_plot(
 
     # Set up ternary axes
     if plot_kdg:
-        ax.set_tlabel('K')
-        ax.set_llabel('D') 
-        ax.set_rlabel('G')
+        ax.set_tlabel('K (GPa)')
+        ax.set_llabel('D (GPa)') 
+        ax.set_rlabel('G (GPa)')
     else:
-        ax.set_tlabel('C11')
-        ax.set_llabel('C12') 
-        ax.set_rlabel('C44')
+        ax.set_tlabel('C11 (GPa)')
+        ax.set_llabel('C12 (GPa)') 
+        ax.set_rlabel('C44 (GPa)')
     
     # Set tick positions and labels
     tick_positions = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
@@ -739,6 +778,30 @@ def create_ternary_plot(
             except Exception:
                 pass
 
+    # Add baseline marker if requested
+    if show_baseline_marker:
+        # Calculate baseline position in ternary coordinates
+        if plot_kdg and base_k is not None and base_d is not None and base_g is not None:
+            # For K/D/G plot, baseline is at (0.5, 0.5, 0.5) in normalized coordinates
+            # which corresponds to the base values
+            baseline_t = 0.5  # K axis
+            baseline_l = 0.5  # D axis
+            baseline_r = 0.5  # G axis
+        else:
+            # For C11/C12/C44 plot
+            baseline_t = 0.5  # C11 axis
+            baseline_l = 0.5  # C12 axis
+            baseline_r = 0.5  # C44 axis
+        
+        # Plot baseline marker with white border for visibility
+        ax.scatter(baseline_t, baseline_l, baseline_r, 
+                  s=300, marker='*', 
+                  c='gold', edgecolors='black', linewidths=2.5,
+                  zorder=10, label='Baseline')
+        
+        # Add legend for baseline marker
+        ax.legend(loc='upper right', frameon=True, framealpha=0.9)
+
     # Set title if provided
     if title:
         ax.set_title(title, pad=20)
@@ -796,13 +859,14 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=32, help="Number of parallel workers for EBSD grain calculations (default: 32)")
     
     # Cache management arguments
-    parser.add_argument("--cache_file", type=str, default="saw_cache.pkl", help="Path to cache file (default: saw_cache.pkl)")
+    parser.add_argument("--cache_file", type=str, default="saw_cache.pkl", help="Path to cache file (default: saw_cache.pkl for SAW, .json for KS)")
     parser.add_argument("--no_cache", action="store_true", help="Disable caching")
     parser.add_argument("--clear_cache", action="store_true", help="Clear the cache and exit")
     parser.add_argument("--cache_stats", action="store_true", help="Show cache statistics and exit")
     
     # Display options
     parser.add_argument("--show_title", action="store_true", help="Show plot title (default: no title)")
+    parser.add_argument("--show_baseline", action="store_true", help="Show baseline marker on ternary plot")
 
     args = parser.parse_args()
 
@@ -982,11 +1046,7 @@ def main() -> None:
             
             # Check cache first
             if use_cache:
-                cached_ks = ks_cache.get(
-                    C11_gpa, C12_gpa, C44_gpa, density,
-                    wavelength_m, deg_inplane, sampling,
-                    ebsd_hash, exp_hash
-                )
+                cached_ks = ks_cache.get(C11_gpa, C12_gpa, C44_gpa, ebsd_hash, exp_hash)
                 if cached_ks is not None:
                     freq_mhz[idx] = cached_ks
                     cache_hits += 1
@@ -1008,16 +1068,16 @@ def main() -> None:
             ks_value = compute_ks_metric(exp_mhz, pred_mhz)
             freq_mhz[idx] = ks_value
             
-            # Cache the result
+            # Cache the result with K/D/G values
             if use_cache:
-                ks_cache.set(
-                    C11_gpa, C12_gpa, C44_gpa, density,
-                    wavelength_m, deg_inplane, sampling,
-                    ebsd_hash, exp_hash, ks_value
-                )
+                K, D, G = compute_kdg_from_c11c12c44(C11_gpa, C12_gpa, C44_gpa)
+                ks_cache.set(C11_gpa, C12_gpa, C44_gpa, ebsd_hash, exp_hash, ks_value, K, D, G)
         
         if use_cache:
             print(f"Cache hits: {cache_hits}/{len(valid_indices)} ({cache_hits/len(valid_indices)*100:.1f}%)")
+            # Flush any remaining pending writes
+            ks_cache.flush()
+            print(f"Cache flushed to {cache_file}")
         
         # Plot raw KS metric (ranges from 0 to 1)
         # Lower KS is better (distributions are more similar), so use reversed colormap
@@ -1139,6 +1199,7 @@ def main() -> None:
         base_d=base_d,
         base_g=base_g,
         rel_max_percent=rel_max_percent,
+        show_baseline_marker=args.show_baseline,
     )
     
     # Show final cache statistics
